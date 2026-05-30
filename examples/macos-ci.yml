@@ -1,0 +1,130 @@
+# Example GitHub Actions workflow for a macOS / Xcode project running on a
+# self-hosted runner provisioned by this repo's setup-macos-runner.sh.
+#
+# It bakes in the runner-specific hardening that this setup is built around:
+#   - Homebrew on the non-login-shell PATH
+#   - reclaiming leaked SimMetalHost processes before booting a sim
+#   - ensuring an iOS runtime exists
+#   - resolving the simulator by UDID (immune to duplicate "iPhone 16" devices)
+#
+# Copy to .github/workflows/ci.yml in your repo and fill in the `env` block.
+
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # --- point these at your project ---
+  XCODE_PROJECT: YourApp/YourApp.xcodeproj   # for a workspace, swap -project for -workspace below
+  XCODE_SCHEME: YourApp
+  SIMULATOR_DESTINATION: 'platform=iOS Simulator,name=iPhone 16,OS=latest'
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: [self-hosted, macOS, ARM64]
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Add Homebrew to PATH
+        run: echo "/opt/homebrew/bin" >> "$GITHUB_PATH"
+
+      - name: Install SwiftLint
+        run: command -v swiftlint || brew install swiftlint
+
+      - name: Run SwiftLint
+        run: swiftlint --strict
+
+      - name: Install SwiftFormat
+        run: command -v swiftformat || brew install swiftformat
+
+      - name: Run SwiftFormat (lint mode)
+        run: swiftformat --lint .
+
+  build-test:
+    name: Build & Test
+    runs-on: [self-hosted, macOS, ARM64]
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Add Homebrew to PATH
+        run: echo "/opt/homebrew/bin" >> "$GITHUB_PATH"
+
+      # SimMetalHost leaks across runs until it exhausts the proc table and blocks sim boots.
+      - name: Reclaim leaked simulators
+        run: |
+          xcrun simctl shutdown all 2>/dev/null || true
+          killall -9 SimMetalHost 2>/dev/null || true
+
+      - name: Install xcbeautify
+        run: command -v xcbeautify || brew install xcbeautify
+
+      - name: Ensure an iOS runtime is installed
+        run: |
+          set -e
+          xcrun simctl list runtimes | grep -qE "^iOS [0-9]" || sudo xcodebuild -downloadPlatform iOS
+
+      # Target by UDID — runners accumulate duplicate "iPhone 16" devices, making name+OS ambiguous.
+      - name: Resolve iPhone 16 simulator
+        run: |
+          set -e
+          runtime=$(xcrun simctl list runtimes | grep -E "^iOS " | sort -V | tail -1 \
+            | grep -oE "com.apple.CoreSimulator.SimRuntime.iOS-[0-9-]+")
+          udid=$(xcrun simctl list devices "$runtime" available | grep "iPhone 16 (" | head -1 \
+            | grep -oiE "[0-9A-F]{8}-([0-9A-F]{4}-){3}[0-9A-F]{12}" || true)
+          [ -z "$udid" ] && udid=$(xcrun simctl create "iPhone 16" "iPhone 16" "$runtime")
+          echo "SIM_UDID=$udid" >> "$GITHUB_ENV"
+          echo "SIMULATOR_DESTINATION=platform=iOS Simulator,id=$udid" >> "$GITHUB_ENV"
+
+      - name: Preboot simulator
+        run: |
+          xcrun simctl boot "$SIM_UDID" || true
+          xcrun simctl bootstatus "$SIM_UDID" -b || true
+
+      - name: Cache Xcode DerivedData
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Developer/Xcode/DerivedData/*/Build
+          key: ${{ runner.os }}-derived-data-${{ hashFiles('**/*.pbxproj') }}
+          restore-keys: ${{ runner.os }}-derived-data-
+
+      - name: Build for testing
+        run: |
+          set -o pipefail
+          xcodebuild build-for-testing \
+            -project "$XCODE_PROJECT" \
+            -scheme "$XCODE_SCHEME" \
+            -destination "$SIMULATOR_DESTINATION" \
+            CODE_SIGNING_ALLOWED=NO \
+            | xcbeautify --renderer github-actions
+
+      - name: Run tests
+        run: |
+          set -o pipefail
+          # Options, if you need them:
+          #   -only-testing:YourAppTests              run a subset
+          #   -skip-testing:YourAppTests/FlakyTarget  skip a flaky/perf target
+          #   -parallel-testing-enabled NO            serialize if suites share global state and race
+          #   -retry-tests-on-failure -test-iterations 2   retry flaky UI tests
+          xcodebuild test-without-building \
+            -project "$XCODE_PROJECT" \
+            -scheme "$XCODE_SCHEME" \
+            -destination "$SIMULATOR_DESTINATION" \
+            -resultBundlePath TestResults.xcresult \
+            CODE_SIGNING_ALLOWED=NO \
+            | xcbeautify --renderer github-actions
+
+      - name: Upload test results
+        if: always() && hashFiles('TestResults.xcresult/**') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: TestResults.xcresult

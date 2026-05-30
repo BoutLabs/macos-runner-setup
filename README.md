@@ -33,6 +33,10 @@ Flags:
 5. **Simulator device** — ensures the target device exists **on the newest runtime**, creating it if needed; warns if duplicates have accumulated.
 6. **Runner registration** — checks for a configured runner; if none, prints the exact `…/settings/actions/runners/new` URL and the labels CI expects (`self-hosted, macOS, ARM64`). Registration is interactive (needs a one-time token from GitHub) and is never stored here.
 
+## Example workflow
+
+[`examples/macos-ci.yml`](examples/macos-ci.yml) is a reference GitHub Actions workflow for a macOS / Xcode project that runs on a runner provisioned by this script. It bakes in the same hardening — Homebrew PATH, `SimMetalHost` reclaim, runtime-ensure, and sim-by-UDID resolution. Copy it to `.github/workflows/ci.yml` and fill in the `env` block (project, scheme, destination).
+
 ## Notes
 
 - macOS + Apple Silicon (`arm64`) assumed; CI labels expect `ARM64` and Homebrew lives at `/opt/homebrew`.
