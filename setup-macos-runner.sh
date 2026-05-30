@@ -78,6 +78,21 @@ else
   sudo xcodebuild -downloadPlatform iOS
 fi
 
+# --- Reclaim leaked simulator processes ---------------------------------------
+# SimMetalHost (the per-boot Metal render helper) leaks on shutdown/crash and
+# piles up until it exhausts the process table, blocking new sim boots. simctl
+# shutdown doesn't reap it, so kill it explicitly.
+bold "Reclaim leaked simulators"
+xcrun simctl shutdown all 2>/dev/null || true
+leaked=$(pgrep -x SimMetalHost | wc -l | tr -d ' ')
+if [[ "$leaked" -gt 0 ]]; then
+  killall -9 SimMetalHost 2>/dev/null || true
+  warn "killed $leaked leaked SimMetalHost process(es)"
+else
+  ok "no leaked SimMetalHost processes"
+fi
+xcrun simctl delete unavailable 2>/dev/null || true
+
 # --- iPhone simulator device on the latest runtime ----------------------------
 bold "$SIM_DEVICE simulator"
 runtime=$(xcrun simctl list runtimes | grep -E "^iOS " | sort -V | tail -1 \
